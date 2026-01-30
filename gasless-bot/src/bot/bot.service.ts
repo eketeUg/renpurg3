@@ -1,4 +1,3 @@
-import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -12,6 +11,9 @@ import {
   welcomeMessageMarkup,
 } from './markups';
 import { KoraClientService } from 'src/kora-client/kora-client.service';
+import { createKeyPairSignerFromBytes } from '@solana/kit';
+import bs58 from 'bs58';
+
 const token = process.env.TELEGRAM_TOKEN;
 
 @Injectable()
@@ -35,7 +37,7 @@ export class BotService {
       await this.gaslessBot.sendChatAction(msg.chat.id, 'typing');
 
       const sendRegex =
-        /^\s*(\d+)\s+(?:USDC\s+)?([1-9A-HJ-NP-Za-km-z]{32,44})\s*$/;
+        /^\s*(\d+(?:\.\d+)?)\s+(?:USDC\s+)?([1-9A-HJ-NP-Za-km-z]{32,44})\s*$/;
       const matchSend = msg.text?.trim().match(sendRegex);
 
       const user = await this.UserModel.findOne({ chatId: msg.chat.id });
@@ -71,7 +73,11 @@ export class BotService {
           user!.svmWalletDetails,
         );
 
-        const senderKeyPair = sendPrivateKey;
+        // Convert base58 private key to KeyPairSigner
+        const secretKeyBytes = bs58.decode(sendPrivateKey.privateKey);
+        const senderKeyPair =
+          await createKeyPairSignerFromBytes(secretKeyBytes);
+
         const sendResult = await this.koraService.sendToken(
           senderKeyPair,
           recipientAddress,

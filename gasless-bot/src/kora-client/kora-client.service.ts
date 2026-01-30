@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { KoraClient } from '@solana/kora';
 import {
   address,
@@ -27,9 +27,12 @@ import {
   updateOrAppendSetComputeUnitLimitInstruction,
   updateOrAppendSetComputeUnitPriceInstruction,
 } from '@solana-program/compute-budget';
+// import * as dotenv from 'dotenv';
+// dotenv.config();
 
 @Injectable()
 export class KoraClientService {
+  private readonly logger = new Logger(KoraClientService.name);
   private CONFIG = {
     computeUnitLimit: 200_000,
     computeUnitPrice: 1_000_000n as MicroLamports,
@@ -38,10 +41,10 @@ export class KoraClientService {
     koraRpcUrl: process.env.KORA_RPC_URL,
   };
   private koraClient: KoraClient;
-  private rpc;
-  private rpcSubscriptions;
-  private confirmTransaction;
-  private kora_signer;
+  private rpc: Rpc<SolanaRpcApi>;
+  private rpcSubscriptions: any;
+  private confirmTransaction: any;
+  private kora_signer: any;
 
   constructor() {
     this.koraClient = new KoraClient({
@@ -49,77 +52,64 @@ export class KoraClientService {
     });
     this.rpc = createSolanaRpc(this.CONFIG.solanaRpcUrl!);
     this.rpcSubscriptions = createSolanaRpcSubscriptions(
-      this.CONFIG.solanaWsUrl,
+      this.CONFIG.solanaWsUrl!,
     );
 
     this.confirmTransaction = createRecentSignatureConfirmationPromiseFactory({
-      rpc: this.rpc,
+      rpc: this.rpc as any,
       rpcSubscriptions: this.rpcSubscriptions,
     });
 
     this.kora_signer = this.koraClient.getPayerSigner();
   }
 
-  createInstructions = async (sender: KeyPairSigner, receiver: string) => {
-    console.log('\n[1/4] Creating instructions');
+  private async createTransferInstructions(
+    sender: KeyPairSigner,
+    receiver: string,
+    amount: number,
+  ) {
+    this.logger.log('[1/4] Creating instructions');
+
+    // Get authorized payment token configuration
     const paymentToken = await this.koraClient
       .getConfig()
-      .then((config) => config.validation_config.allowed_spl_paid_tokens[0]);
+      .then((config) => config.validation_config.allowed_spl_paid_tokens[1]);
 
-    console.log('  → Payment token:', paymentToken);
+    this.logger.debug(`Payment token: ${paymentToken}`);
 
     // Create token transfer (will initialize ATA if needed)
+    // Assuming USDC (6 decimals) for the calculation. verify decimals if shifting to other tokens.
+    const amountInSmallestUnit = Math.floor(amount * 1_000_000);
+
     const transferTokens = await this.koraClient.transferTransaction({
-      amount: 10_000_000, // 10 USDC (6 decimals)
+      amount: amountInSmallestUnit,
       token: paymentToken,
       source: sender.address,
       destination: receiver,
     });
-    console.log('  ✓ Token transfer instruction created');
-
-    // Create SOL transfer
-    const transferSol = await this.koraClient.transferTransaction({
-      amount: 10_000_000, // 0.01 SOL (9 decimals)
-      token: '11111111111111111111111111111111', // SOL mint address
-      source: sender.address,
-      destination: receiver,
-    });
-    console.log('  ✓ SOL transfer instruction created');
 
     // Add memo instruction
     const memoInstruction = getAddMemoInstruction({
-      memo: 'Hello, Kora-gasless bot transfer!',
+      memo: 'Sent via Kora Gasless Bot',
     });
-    console.log('  ✓ Memo instruction created');
 
-    const instructions = [
-      ...transferTokens.instructions,
-      ...transferSol.instructions,
-      memoInstruction,
-    ];
+    const instructions = [...transferTokens.instructions, memoInstruction];
 
-    console.log(`  → Total: ${instructions.length} instructions`);
     return { instructions, paymentToken };
-  };
+  }
 
-  getPaymentInstructions = async (
+  private async getPaymentInstructions(
     instructions: Instruction[],
     sender: KeyPairSigner,
     paymentToken: string,
-  ): Promise<{ paymentInstruction: Instruction }> => {
-    console.log(
-      '\n[2/4] Estimating Kora fee and assembling payment instruction',
+  ): Promise<{ paymentInstruction: Instruction }> {
+    this.logger.log(
+      '[2/4] Estimating Kora fee and assembling payment instruction',
     );
 
     const { signer_address } = await this.koraClient.getPayerSigner();
     const noopSigner = createNoopSigner(address(signer_address));
     const latestBlockhash = await this.koraClient.getBlockhash();
-
-    console.log('  → Fee payer:', signer_address.slice(0, 8) + '...');
-    console.log(
-      '  → Blockhash:',
-      latestBlockhash.blockhash.slice(0, 8) + '...',
-    );
 
     // Create estimate transaction to get payment instruction
     const estimateTransaction = pipe(
@@ -151,7 +141,6 @@ export class KoraClientService {
     const base64EncodedWireTransaction = getBase64EncodedWireTransaction(
       signedEstimateTransaction,
     );
-    console.log('  ✓ Estimate transaction built');
 
     // Get payment instruction from Kora
     const paymentInstruction = await this.koraClient.getPaymentInstruction({
@@ -159,21 +148,22 @@ export class KoraClientService {
       fee_token: paymentToken,
       source_wallet: sender.address,
     });
-    console.log('  ✓ Payment instruction received from Kora');
 
     return { paymentInstruction: paymentInstruction.payment_instruction };
-  };
+  }
 
-  getFinalTransaction = async (
+  private async getFinalTransaction(
     paymentInstruction: Instruction,
     sender: KeyPairSigner,
     instructions: Instruction[],
     signer_address: string,
-  ): Promise<Base64EncodedWireTransaction> => {
-    console.log(
-      '\n[3/4] Creating and signing final transaction (with payment)',
+  ): Promise<Base64EncodedWireTransaction> {
+    this.logger.log(
+      '[3/4] Creating and signing final transaction (with payment)',
     );
+    console.log('signer_address', signer_address);
     const noopSigner = createNoopSigner(address(signer_address));
+    console.log('noopSinger', noopSigner);
 
     // Build final transaction with payment instruction
     const newBlockhash = await this.koraClient.getBlockhash();
@@ -204,7 +194,6 @@ export class KoraClientService {
           tx,
         ),
     );
-    console.log('  ✓ Final transaction built with payment');
 
     // Sign with user keypair
     const signedFullTransaction =
@@ -216,21 +205,18 @@ export class KoraClientService {
     const base64EncodedWireFullTransaction = getBase64EncodedWireTransaction(
       userSignedTransaction,
     );
-    console.log('  ✓ Transaction signed by user');
 
     return base64EncodedWireFullTransaction;
-  };
+  }
 
-  submitTransaction = async (
+  private async submitTransaction(
     rpc: Rpc<SolanaRpcApi>,
-    confirmTransaction: ReturnType<
-      typeof createRecentSignatureConfirmationPromiseFactory
-    >,
+    confirmTransaction: any,
     signedTransaction: Base64EncodedWireTransaction,
     signer_address: string,
-  ) => {
-    console.log(
-      '\n[4/4] Signing transaction with Kora and sending to Solana cluster',
+  ) {
+    this.logger.log(
+      '[4/4] Signing transaction with Kora and sending to Solana cluster',
     );
 
     // Get Kora's signature
@@ -238,7 +224,6 @@ export class KoraClientService {
       transaction: signedTransaction,
       signer_key: signer_address,
     });
-    console.log('  ✓ Transaction co-signed by Kora');
 
     // Submit to Solana network
     const signature = await rpc
@@ -246,70 +231,65 @@ export class KoraClientService {
         encoding: 'base64',
       })
       .send();
-    console.log('  ✓ Transaction submitted to network');
 
-    console.log('  ⏳ Awaiting confirmation...');
+    this.logger.log(`Transaction submitted: ${signature}`);
+    this.logger.log('Awaiting confirmation...');
+
     await confirmTransaction({
       commitment: 'confirmed',
       signature,
       abortSignal: new AbortController().signal,
     });
 
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('SUCCESS: Transaction confirmed on Solana');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('\nTransaction signature:');
-    console.log(signature);
-
+    this.logger.log('Transaction confirmed successfully');
     return signature;
-  };
+  }
 
-  sendToken = async (
+  public sendToken = async (
     sender: KeyPairSigner,
-    received: string,
-    amount: string,
+    recipient: string,
+    amount: number,
   ) => {
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('KORA GASLESS TRANSACTION DEMO');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
     try {
-      // Step 3: Create demo instructions
-      const { instructions, paymentToken } = await this.createInstructions(
-        sender,
-        received,
-      );
+      const koraSigner = await this.koraClient.getPayerSigner();
+      // Step 1: Create instructions
+      const { instructions, paymentToken } =
+        await this.createTransferInstructions(sender, recipient, amount);
 
-      // Step 4: Get payment instruction from Kora
+      // Step 2: Get payment instruction from Kora
       const { paymentInstruction } = await this.getPaymentInstructions(
         instructions,
         sender,
         paymentToken,
       );
 
-      // Step 5: Create and partially sign final transaction
+      // Step 3: Create and partially sign final transaction
       const finalSignedTransaction = await this.getFinalTransaction(
         paymentInstruction,
         sender,
         instructions,
-        this.kora_signer,
+        koraSigner.signer_address,
       );
 
-      // Step 6: Get Kora's signature and submit to Solana cluster
-      await this.submitTransaction(
+      // Step 4: Get Kora's signature and submit to Solana cluster
+      const transactionSignature = await this.submitTransaction(
         this.rpc,
         this.confirmTransaction,
         finalSignedTransaction,
-        this.kora_signer.address,
+        koraSigner.signer_address,
       );
+
+      return {
+        success: true,
+        transactionSignature,
+      };
     } catch (error) {
-      console.error(
-        '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-      );
-      console.error('ERROR: Demo failed');
-      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.error('\nDetails:', error);
-      process.exit(1);
+      console.log(error);
+      this.logger.error('Gasless transfer failed', error);
+      return {
+        success: false,
+        errorMessage: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   };
 }

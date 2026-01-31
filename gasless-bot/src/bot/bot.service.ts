@@ -7,12 +7,14 @@ import { WalletService } from 'src/wallet/wallet.service';
 import {
   allFeaturesMarkup,
   showBalanceMarkup,
+  showKoraNodeStatsMarkup,
   walletDetailsMarkup,
   welcomeMessageMarkup,
 } from './markups';
-import { KoraClientService } from 'src/kora-client/kora-client.service';
-import { createKeyPairSignerFromBytes } from '@solana/kit';
+
 import bs58 from 'bs58';
+import { KoraClientService } from 'src/kora-client/kora-client.service';
+import { Keypair } from '@solana/web3.js';
 
 const token = process.env.TELEGRAM_TOKEN;
 
@@ -56,7 +58,7 @@ export class BotService {
 
         const usdcBalance = await this.walletService.getUSDCBalance(
           senderAddress,
-          process.env.SOLANA_RPC!,
+          process.env.SOLANA_RPC_URL!,
         );
 
         if (usdcBalance.balance < parseFloat(amount)) {
@@ -73,21 +75,24 @@ export class BotService {
           user!.svmWalletDetails,
         );
 
-        // Convert base58 private key to KeyPairSigner
-        const secretKeyBytes = bs58.decode(sendPrivateKey.privateKey);
-        const senderKeyPair =
-          await createKeyPairSignerFromBytes(secretKeyBytes);
+        console.log('rpc :', process.env.SOLANA_RPC_URL!);
 
-        const sendResult = await this.koraService.sendToken(
-          senderKeyPair,
-          recipientAddress,
-          parseFloat(amount),
+        const signer = Keypair.fromSecretKey(
+          bs58.decode(sendPrivateKey.privateKey),
         );
 
-        if (sendResult.success) {
+        const sendResult = await this.koraService.sendToken(
+          user.svmWalletAddress,
+          recipientAddress,
+          parseFloat(amount),
+          signer,
+        );
+
+        console.log('Send Result:', sendResult);
+        if (sendResult.signature) {
           return await this.gaslessBot.sendMessage(
             msg.chat.id,
-            `✅ Successfully sent ${amount} USDC to <b><code>${recipientAddress}</code></b>\n\nTransaction Signature: <b><code>${sendResult.transactionSignature}</code></b>`,
+            `✅ Successfully sent ${amount} USDC to <code>${recipientAddress}</code>\n\nTransaction Signature: <a href="${process.env.SOLANA_SCAN_URL}tx/${sendResult.signature}?cluster=devnet">${sendResult.signature}</a>`,
             { parse_mode: 'HTML' },
           );
         } else {
@@ -132,11 +137,11 @@ export class BotService {
           const [solBalance, usdcBalance] = await Promise.all([
             this.walletService.getSolBalance(
               newSVMWallet.address,
-              process.env.SOLANA_RPC!,
+              process.env.SOLANA_RPC_URL!,
             ),
             this.walletService.getUSDCBalance(
               newSVMWallet.address,
-              process.env.SOLANA_RPC!,
+              process.env.SOLANA_RPC_URL!,
             ),
           ]);
           welcome = await welcomeMessageMarkup(
@@ -149,11 +154,11 @@ export class BotService {
         const [solBalance, usdcBalance] = await Promise.all([
           this.walletService.getSolBalance(
             user.svmWalletAddress,
-            process.env.SOLANA_RPC!,
+            process.env.SOLANA_RPC_URL!,
           ),
           this.walletService.getUSDCBalance(
             user.svmWalletAddress,
-            process.env.SOLANA_RPC!,
+            process.env.SOLANA_RPC_URL!,
           ),
         ]);
 
@@ -278,6 +283,9 @@ export class BotService {
         case '/checkBalance':
           return this.showBalance(chatId);
 
+        case '/viewKoraNodeStats':
+          return this.viewKoraNode(chatId);
+
         case '/sendUSDC':
           await this.gaslessBot.sendChatAction(chatId, 'typing');
 
@@ -334,11 +342,11 @@ export class BotService {
       const [solBalance, usdcBalance] = await Promise.all([
         this.walletService.getSolBalance(
           user.svmWalletAddress,
-          process.env.SOLANA_RPC!,
+          process.env.SOLANA_RPC_URL!,
         ),
         this.walletService.getUSDCBalance(
           user.svmWalletAddress,
-          process.env.SOLANA_RPC!,
+          process.env.SOLANA_RPC_URL!,
         ),
       ]);
       const allWalletFeatures = await walletDetailsMarkup(
@@ -360,6 +368,30 @@ export class BotService {
     }
   };
 
+  viewKoraNode = async (chatId: any) => {
+    try {
+      await this.gaslessBot.sendChatAction(chatId, 'typing');
+
+      const kora_provider_details = await showKoraNodeStatsMarkup();
+      if (kora_provider_details) {
+        const replyMarkup = {
+          inline_keyboard: kora_provider_details.keyboard,
+        };
+        await this.gaslessBot.sendMessage(
+          chatId,
+          kora_provider_details.message,
+          {
+            parse_mode: 'HTML',
+            reply_markup: replyMarkup,
+          },
+        );
+      }
+      return;
+    } catch (error) {
+      console.log(error);
+    }
+  };
+
   showBalance = async (chatId: string, showMarkUp = true) => {
     try {
       await this.gaslessBot.sendChatAction(chatId, 'typing');
@@ -374,11 +406,11 @@ export class BotService {
       const [solBalance, usdcBalance] = await Promise.all([
         this.walletService.getSolBalance(
           user.svmWalletAddress,
-          process.env.SOLANA_RPC!,
+          process.env.SOLANA_RPC_URL!,
         ),
         this.walletService.getUSDCBalance(
           user.svmWalletAddress,
-          process.env.SOLANA_RPC!,
+          process.env.SOLANA_RPC_URL!,
         ),
       ]);
 

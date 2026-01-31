@@ -18,6 +18,7 @@ import bs58 from 'bs58';
 import * as dotenv from 'dotenv';
 import {
   getAssociatedTokenAddress,
+  getOrCreateAssociatedTokenAccount,
   getAccount,
   createTransferInstruction,
   TOKEN_PROGRAM_ID,
@@ -336,6 +337,12 @@ export class WalletService {
     description?: string,
   ): Promise<Record<any, unknown>> => {
     try {
+      console.log('RPC URL:', rpcURL);
+      console.log('privateKey:', privateKey);
+      console.log('recipientAddress:', recipientAddress);
+      console.log('amount:', amount);
+      console.log('tokenAddress:', tokenAddress);
+      console.log('decimal:', decimal);
       const connection = new Connection(rpcURL, 'confirmed');
       const senderKeypair = Keypair.fromSecretKey(bs58.decode(privateKey));
       const recipientPubkey = new PublicKey(recipientAddress);
@@ -345,7 +352,9 @@ export class WalletService {
         tokenMint,
         senderKeypair.publicKey,
       );
-      const recipientATA = await getAssociatedTokenAddress(
+      const recipientATA = await getOrCreateAssociatedTokenAccount(
+        connection,
+        senderKeypair, // payer
         tokenMint,
         recipientPubkey,
       );
@@ -353,7 +362,7 @@ export class WalletService {
       const transaction = new Transaction().add(
         createTransferInstruction(
           senderATA,
-          recipientATA,
+          recipientATA.address,
           senderKeypair.publicKey,
           amount * 10 ** decimal,
           [],
@@ -371,6 +380,59 @@ export class WalletService {
         signature,
         description,
       };
+    } catch (error) {
+      throw new Error(`Failed to transfer SPL token: ${error.message}`);
+    }
+  };
+
+  builtTokenTranferTx = async (
+    privateKey: string,
+    recipientAddress: string,
+    amount: number,
+    tokenAddress: string,
+    rpcURL: string,
+    decimal: number,
+  ): Promise<any> => {
+    try {
+      console.log('RPC URL:', rpcURL);
+      console.log('privateKey:', privateKey);
+      console.log('recipientAddress:', recipientAddress);
+      console.log('amount:', amount);
+      console.log('tokenAddress:', tokenAddress);
+      console.log('decimal:', decimal);
+      const connection = new Connection(rpcURL, 'confirmed');
+      const senderKeypair = Keypair.fromSecretKey(bs58.decode(privateKey));
+      const recipientPubkey = new PublicKey(recipientAddress);
+      const tokenMint = new PublicKey(tokenAddress);
+
+      const senderATA = await getAssociatedTokenAddress(
+        tokenMint,
+        senderKeypair.publicKey,
+      );
+      const recipientATA = await getOrCreateAssociatedTokenAccount(
+        connection,
+        senderKeypair, // payer
+        tokenMint,
+        recipientPubkey,
+      );
+
+      const transaction = new Transaction().add(
+        createTransferInstruction(
+          senderATA,
+          recipientATA.address,
+          senderKeypair.publicKey,
+          amount * 10 ** decimal,
+          [],
+          TOKEN_PROGRAM_ID,
+        ),
+      );
+
+      const { blockhash } = await connection.getLatestBlockhash();
+
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = senderKeypair.publicKey;
+
+      return transaction;
     } catch (error) {
       throw new Error(`Failed to transfer SPL token: ${error.message}`);
     }

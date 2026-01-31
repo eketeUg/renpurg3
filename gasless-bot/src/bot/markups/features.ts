@@ -29,6 +29,15 @@ export const allFeaturesMarkup = async () => {
       ],
       [
         {
+          text: 'View Kora-node Provider',
+          callback_data: JSON.stringify({
+            command: '/viewKoraNodeStats',
+            language: 'english',
+          }),
+        },
+      ],
+      [
+        {
           text: 'Close ❌',
           callback_data: JSON.stringify({
             command: '/close',

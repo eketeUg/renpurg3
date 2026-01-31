@@ -9,7 +9,7 @@ export const walletDetailsMarkup = async (
     keyboard.push([
       {
         text: '🔎 View on solscan explorer',
-        url: `${process.env.SOLANA_SCAN_URL}/address/${svmAddress}?cluster=devnet`,
+        url: `${process.env.SOLANA_SCAN_URL}address/${svmAddress}?cluster=devnet`,
       },
     ]);
   }

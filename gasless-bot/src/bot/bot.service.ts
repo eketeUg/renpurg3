@@ -38,9 +38,14 @@ export class BotService {
     try {
       await this.gaslessBot.sendChatAction(msg.chat.id, 'typing');
 
+      const command = msg.text!;
+
       const sendRegex =
-        /^\s*(\d+(?:\.\d+)?)\s+(?:USDC\s+)?([1-9A-HJ-NP-Za-km-z]{32,44})\s*$/;
-      const matchSend = msg.text?.trim().match(sendRegex);
+        /^\s*(?:send\s+)?(\d+(?:\.\d+)?)\s+(?:usdc\s+)?([1-9A-HJ-NP-Za-km-z]{32,44})\s*$/i;
+
+      const matchSend = command?.trim().match(sendRegex);
+
+      console.log('matchSend :', matchSend);
 
       const user = await this.UserModel.findOne({ chatId: msg.chat.id });
 
@@ -81,6 +86,7 @@ export class BotService {
           bs58.decode(sendPrivateKey.privateKey),
         );
 
+        const stopLoader = await this.sendStickerLoader(msg.chat.id);
         const sendResult = await this.koraService.sendToken(
           user.svmWalletAddress,
           recipientAddress,
@@ -88,31 +94,21 @@ export class BotService {
           signer,
         );
 
-        console.log('Send Result:', sendResult);
         if (sendResult.signature) {
+          await stopLoader();
           return await this.gaslessBot.sendMessage(
             msg.chat.id,
             `✅ Successfully sent ${amount} USDC to <code>${recipientAddress}</code>\n\nTransaction Signature: <a href="${process.env.SOLANA_SCAN_URL}tx/${sendResult.signature}?cluster=devnet">${sendResult.signature}</a>`,
             { parse_mode: 'HTML' },
           );
         } else {
+          await stopLoader();
           return await this.gaslessBot.sendMessage(
             msg.chat.id,
             `❌ Failed to send USDC: ${sendResult.errorMessage}`,
           );
         }
       }
-
-      if (
-        msg.text !== '/start' &&
-        msg.text !== '/menu' &&
-        msg.text !== '/cancel' &&
-        msg.text !== '/balance'
-      ) {
-        // return this.handleUserTextInputs(msg, session!);
-      }
-      const command = msg.text!;
-      console.log('Command :', command);
 
       if (command === '/start') {
         let welcome;
@@ -454,6 +450,36 @@ export class BotService {
       );
     } catch (error) {
       console.log(error);
+    }
+  };
+
+  sendStickerLoader = async (chatId: TelegramBot.ChatId) => {
+    try {
+      const animationMsg = await this.gaslessBot.sendAnimation(
+        chatId,
+        'https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExZnIxOTZ3bWQ5OTJtcTBncXl3Nzl1cm00NGd4NGZqMW84bTE0b3M3byZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/FAgpqNvSeUQSmrOewI/giphy.gif',
+      );
+
+      const textMsg = await this.gaslessBot.sendMessage(
+        chatId,
+        'Sending Token please wait ...',
+      );
+
+      // 👇 return cleanup function
+      return async () => {
+        try {
+          await this.gaslessBot.deleteMessage(chatId, animationMsg.message_id);
+
+          await this.gaslessBot.deleteMessage(chatId, textMsg.message_id);
+        } catch (err) {
+          console.log('Failed to cleanup loader:', err.message);
+        }
+      };
+    } catch (error) {
+      console.log(error);
+
+      // fallback empty cleanup
+      return async () => {};
     }
   };
 }

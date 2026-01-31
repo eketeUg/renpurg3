@@ -1,120 +1,152 @@
-import {
-  Connection,
-  PublicKey,
-  ParsedTransactionWithMeta,
-} from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { Connection, PublicKey } from '@solana/web3.js';
+import * as dotenv from 'dotenv';
 
-const KORA_OPERATOR_WALLET = new PublicKey(
-  'HJ6421bZ1bFc17W5HzTtogpkzVDfh7pCUoGdzhM4AEkz',
+dotenv.config();
+
+const connection = new Connection(process.env.SOLANA_RPC_URL!, 'confirmed');
+
+const yourWallet = new PublicKey(
+  '7eBmtW8CG1zJ6mEYbTpbLRtjD1BLHdQdU5Jc8Uip42eE',
 );
 
-const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+// ATA Program
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey(
+  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+);
 
-/**
- * Identify accounts sponsored by Kora and check if they are reclaimable.
- */
-async function dryRunReclaim() {
+type Result = {
+  signature: string;
+  ata: string;
+  mint: string;
+  owner: string;
+  closeAuthority: string | null;
+  rentPaidLamports: bigint;
+  estimatedClaimableLamports: bigint;
+  timestamp?: number;
+};
+
+async function findATAsYouPaidFor(
+  limit = 50,
+  targetMint?: string, // optional filter
+): Promise<Result[]> {
+  let rentExemptLamports = 0n;
+
+  try {
+    rentExemptLamports = BigInt(
+      await connection.getMinimumBalanceForRentExemption(165),
+    );
+  } catch {}
+
   console.log(
-    `--- Starting Kora Rent-Reclaim Scan for: ${KORA_OPERATOR_WALLET.toBase58()} ---\n`,
+    `Rent-exempt ATA: ${rentExemptLamports} lamports (~${(
+      Number(rentExemptLamports) / 1e9
+    ).toFixed(9)} SOL)`,
   );
 
-  // 1. Get recent transactions for the operator
-  const signatures = await connection.getSignaturesForAddress(
-    KORA_OPERATOR_WALLET,
-    { limit: 20 },
-  );
+  const signatures = await connection.getSignaturesForAddress(yourWallet, {
+    limit,
+  });
 
-  let totalPotentialRecovery = 0;
+  const results: Result[] = [];
 
   for (const sigInfo of signatures) {
-    const tx: ParsedTransactionWithMeta | null =
-      await connection.getParsedTransaction(sigInfo.signature, {
-        maxSupportedTransactionVersion: 0,
-      });
+    if (sigInfo.err) continue;
 
-    if (!tx || tx.meta?.err) continue;
+    const tx = await connection.getParsedTransaction(sigInfo.signature, {
+      maxSupportedTransactionVersion: 0,
+      commitment: 'confirmed',
+    });
 
-    const feePayer = tx.transaction.message.accountKeys[0].pubkey;
-    if (!feePayer.equals(KORA_OPERATOR_WALLET)) continue;
+    if (!tx) continue;
 
-    // --- 2. Check main instructions ---
-    const instructions = tx.transaction.message.instructions as any[];
-    for (const ix of instructions) {
-      if (
-        ix.program === 'spl-token' &&
-        ix.parsed?.type === 'initializeAccount'
-      ) {
-        const candidateAcc = new PublicKey(ix.parsed.info.account);
+    // Must involve ATA program
+    const hasAtaProgram = tx.transaction.message.accountKeys.some((k) =>
+      k.pubkey.equals(ASSOCIATED_TOKEN_PROGRAM_ID),
+    );
+    if (!hasAtaProgram) continue;
 
-        await checkAndReportAccount(
-          candidateAcc,
-          TOKEN_PROGRAM_ID,
-          'SPL Token',
+    if (!tx.meta?.preBalances || !tx.meta?.postBalances) continue;
+
+    for (const [idx, acc] of tx.transaction.message.accountKeys.entries()) {
+      const pre = tx.meta.preBalances[idx];
+      const post = tx.meta.postBalances[idx];
+
+      // New account created
+      if (pre === 0 && post > 0) {
+        const tokenBalance = tx.meta.postTokenBalances?.find(
+          (b) => b.accountIndex === idx,
         );
-      }
-    }
 
-    // --- 3. Check inner instructions for system.createAccount ---
-    const innerInstructions = tx.meta?.innerInstructions ?? [];
-    for (const inner of innerInstructions) {
-      for (const ix of inner.instructions as any[]) {
-        if (ix.program === 'system' && ix.parsed?.type === 'createAccount') {
-          const candidateAcc = new PublicKey(ix.parsed.info.newAccount);
-          const SYSTEM_PROGRAM_ID = new PublicKey(
-            '11111111111111111111111111111111',
-          );
+        if (!tokenBalance) continue;
 
-          await checkAndReportAccount(
-            candidateAcc,
-            SYSTEM_PROGRAM_ID,
-            'System Account',
-          );
-        }
+        // Optional mint filter
+        if (targetMint && tokenBalance.mint !== targetMint) continue;
+
+        const ataPubkey = acc.pubkey;
+
+        const rentPaid = BigInt(post) - BigInt(pre);
+        const claimable =
+          rentExemptLamports > 0n ? rentExemptLamports : BigInt(post);
+
+        let ataOwner = 'unknown';
+        let closeAuthority: string | null = null;
+
+        try {
+          const info = await connection.getParsedAccountInfo(ataPubkey);
+
+          if (
+            info.value &&
+            'parsed' in info.value.data &&
+            info.value.data.parsed.type === 'account'
+          ) {
+            const parsed = info.value.data.parsed.info;
+            ataOwner = parsed.owner;
+            closeAuthority = parsed.closeAuthority ?? null;
+          }
+        } catch {}
+
+        results.push({
+          signature: sigInfo.signature,
+          ata: ataPubkey.toBase58(),
+          mint: tokenBalance.mint,
+          owner: ataOwner,
+          closeAuthority,
+          rentPaidLamports: rentPaid,
+          estimatedClaimableLamports: claimable,
+          timestamp: sigInfo.blockTime ?? 0,
+        });
+
+        console.log(
+          `ATA Found: ${ataPubkey.toBase58()}\n` +
+            ` Mint            : ${tokenBalance.mint}\n` +
+            ` Owner           : ${ataOwner}\n` +
+            ` Close Authority : ${closeAuthority ?? '(owner)'}\n` +
+            ` Rent Paid       : ${rentPaid} lamports\n` +
+            ` Claimable       : ${claimable} lamports\n`,
+        );
       }
     }
   }
 
-  console.log(`\n--- Summary ---`);
-  console.log(
-    `Potential SOL to Reclaim: ${totalPotentialRecovery.toFixed(6)} SOL`,
+  console.log('\nSummary');
+  console.log(results);
+
+  const total = results.reduce(
+    (sum, r) => sum + r.estimatedClaimableLamports,
+    0n,
   );
 
-  async function checkAndReportAccount(
-    candidateAcc: PublicKey,
-    expectedOwner: PublicKey,
-    label: string,
-  ) {
-    const accountInfo = await connection.getParsedAccountInfo(candidateAcc);
-    if (!accountInfo.value) return;
+  console.log(
+    `Total potential reclaimable rent: ${total} lamports (~${(
+      Number(total) / 1e9
+    ).toFixed(6)} SOL)`,
+  );
 
-    const { lamports, owner, data } = accountInfo.value;
-
-    // Make sure this is parsed data, not raw bytes
-    if (typeof data === 'object' && 'parsed' in data) {
-      const parsedInfo = (data as any).parsed?.info;
-
-      // For SPL Token accounts, check token balance
-      const balance = parsedInfo?.tokenAmount?.uiAmount ?? 0;
-
-      if (owner.equals(expectedOwner) && balance === 0) {
-        const rent = lamports / 1e9;
-        console.log(
-          `[RECLAIMABLE] ${label}: ${candidateAcc.toBase58()} | Rent: ${rent.toFixed(6)} SOL`,
-        );
-        totalPotentialRecovery += rent;
-      }
-    } else {
-      // For raw system accounts, just check owner and lamports
-      if (owner.equals(expectedOwner) && lamports > 0) {
-        const rent = lamports / 1e9;
-        console.log(
-          `[RECLAIMABLE] ${label}: ${candidateAcc.toBase58()} | Rent: ${rent.toFixed(6)} SOL`,
-        );
-        totalPotentialRecovery += rent;
-      }
-    }
-  }
+  return results;
 }
 
-dryRunReclaim();
+// ✅ Find ALL token ATAs you paid for
+findATAsYouPaidFor(100);
+
+// ✅ OR only one mint
+// findATAsYouPaidFor(100, "So11111111111111111111111111111111111111112");

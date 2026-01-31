@@ -1,6 +1,9 @@
 import { Connection, PublicKey } from '@solana/web3.js';
+import * as dotenv from 'dotenv';
 
-const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+dotenv.config();
+
+const connection = new Connection(process.env.SOLANA_RPC_URL!, 'confirmed');
 const yourWallet = new PublicKey(
   '7eBmtW8CG1zJ6mEYbTpbLRtjD1BLHdQdU5Jc8Uip42eE',
 );

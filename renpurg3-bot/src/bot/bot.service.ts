@@ -216,22 +216,27 @@ export class BotService {
   ) => {
     try {
       await this.renPurge3Bot.sendChatAction(chatId, 'typing');
+      const stopLoader = await this.sendStickerLoader(chatId);
       const result = await this.reclaimService.scanProviderWallet(
         providerWallet ? providerWallet : process.env.KORA_PROVIDER_PUBKEY,
       );
 
       if (result.length > 0) {
         const markup = await showKoraNodeStatsMarkup(result);
-        const replyMarkup = {
-          inline_keyboard: markup.keyboard,
-        };
-        await this.renPurge3Bot.sendMessage(chatId, markup.message, {
-          parse_mode: 'HTML',
-          reply_markup: replyMarkup,
-        });
+        if (markup) {
+          await stopLoader();
+          const replyMarkup = {
+            inline_keyboard: markup.keyboard,
+          };
+          await this.renPurge3Bot.sendMessage(chatId, markup.message, {
+            parse_mode: 'HTML',
+            reply_markup: replyMarkup,
+          });
+        }
 
         return;
       } else {
+        await stopLoader();
         await this.renPurge3Bot.sendMessage(
           chatId,
           `No reclaimable ATAs found for the provided wallet.`,
@@ -243,6 +248,39 @@ export class BotService {
       return;
     } catch (error) {
       console.log(error);
+    }
+  };
+
+  sendStickerLoader = async (chatId: TelegramBot.ChatId) => {
+    try {
+      const animationMsg = await this.renPurge3Bot.sendAnimation(
+        chatId,
+        'https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExZnIxOTZ3bWQ5OTJtcTBncXl3Nzl1cm00NGd4NGZqMW84bTE0b3M3byZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/FAgpqNvSeUQSmrOewI/giphy.gif',
+      );
+
+      const textMsg = await this.renPurge3Bot.sendMessage(
+        chatId,
+        '🔍 Scanning in progress, please wait...',
+      );
+
+      // 👇 return cleanup function
+      return async () => {
+        try {
+          await this.renPurge3Bot.deleteMessage(
+            chatId,
+            animationMsg.message_id,
+          );
+
+          await this.renPurge3Bot.deleteMessage(chatId, textMsg.message_id);
+        } catch (err) {
+          console.log('Failed to cleanup loader:', err.message);
+        }
+      };
+    } catch (error) {
+      console.log(error);
+
+      // fallback empty cleanup
+      return async () => {};
     }
   };
 }

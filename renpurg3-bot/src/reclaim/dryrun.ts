@@ -6,8 +6,9 @@ import {
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
 const KORA_OPERATOR_WALLET = new PublicKey(
-  '3Z1Ef7YaxK8oUMoi6exf7wYZjZKWJJsrzJXSt1c3qrDE',
+  'HJ6421bZ1bFc17W5HzTtogpkzVDfh7pCUoGdzhM4AEkz',
 );
+
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
 
 /**
@@ -18,49 +19,57 @@ async function dryRunReclaim() {
     `--- Starting Kora Rent-Reclaim Scan for: ${KORA_OPERATOR_WALLET.toBase58()} ---\n`,
   );
 
-  // 1. Get transaction history for the operator (Kora Node)
+  // 1. Get recent transactions for the operator
   const signatures = await connection.getSignaturesForAddress(
     KORA_OPERATOR_WALLET,
-    { limit: 50 },
+    { limit: 20 },
   );
 
   let totalPotentialRecovery = 0;
 
   for (const sigInfo of signatures) {
-    const tx = await connection.getParsedTransaction(sigInfo.signature, {
-      maxSupportedTransactionVersion: 0,
-    });
+    const tx: ParsedTransactionWithMeta | null =
+      await connection.getParsedTransaction(sigInfo.signature, {
+        maxSupportedTransactionVersion: 0,
+      });
 
     if (!tx || tx.meta?.err) continue;
 
-    // Check if Kora was the Fee Payer
     const feePayer = tx.transaction.message.accountKeys[0].pubkey;
-    if (feePayer.equals(KORA_OPERATOR_WALLET)) {
-      // 2. Identify newly created accounts in this transaction
-      // We look for 'InitializeAccount' or 'Create' instructions
-      const instructions = tx.transaction.message.instructions;
+    if (!feePayer.equals(KORA_OPERATOR_WALLET)) continue;
 
-      for (const ix of instructions) {
-        // Simplified: Logic to identify candidate accounts (e.g., ATAs)
-        // In a full build, you'd parse innerInstructions for 'SystemProgram.createAccount'
-        // For this dry-run, we'll assume we found a candidate address 'candidateAcc'
+    // --- 2. Check main instructions ---
+    const instructions = tx.transaction.message.instructions as any[];
+    for (const ix of instructions) {
+      if (
+        ix.program === 'spl-token' &&
+        ix.parsed?.type === 'initializeAccount'
+      ) {
+        const candidateAcc = new PublicKey(ix.parsed.info.account);
 
-        const candidateAcc = new PublicKey('...'); // Extracted from IX
+        await checkAndReportAccount(
+          candidateAcc,
+          TOKEN_PROGRAM_ID,
+          'SPL Token',
+        );
+      }
+    }
 
-        // 3. Safety Check: Is it empty?
-        const accountInfo = await connection.getParsedAccountInfo(candidateAcc);
+    // --- 3. Check inner instructions for system.createAccount ---
+    const innerInstructions = tx.meta?.innerInstructions ?? [];
+    for (const inner of innerInstructions) {
+      for (const ix of inner.instructions as any[]) {
+        if (ix.program === 'system' && ix.parsed?.type === 'createAccount') {
+          const candidateAcc = new PublicKey(ix.parsed.info.newAccount);
+          const SYSTEM_PROGRAM_ID = new PublicKey(
+            '11111111111111111111111111111111',
+          );
 
-        if (accountInfo.value?.owner.equals(TOKEN_PROGRAM_ID)) {
-          const data = (accountInfo.value.data as any).parsed.info;
-          const balance = data.tokenAmount.uiAmount;
-
-          if (balance === 0) {
-            const rent = accountInfo.value.lamports / 1e9;
-            console.log(
-              `[RECLAIMABLE] Account: ${candidateAcc.toBase58()} | Rent: ${rent} SOL`,
-            );
-            totalPotentialRecovery += rent;
-          }
+          await checkAndReportAccount(
+            candidateAcc,
+            SYSTEM_PROGRAM_ID,
+            'System Account',
+          );
         }
       }
     }
@@ -68,8 +77,44 @@ async function dryRunReclaim() {
 
   console.log(`\n--- Summary ---`);
   console.log(
-    `Potential SOL to Reclaim: ${totalPotentialRecovery.toFixed(4)} SOL`,
+    `Potential SOL to Reclaim: ${totalPotentialRecovery.toFixed(6)} SOL`,
   );
+
+  async function checkAndReportAccount(
+    candidateAcc: PublicKey,
+    expectedOwner: PublicKey,
+    label: string,
+  ) {
+    const accountInfo = await connection.getParsedAccountInfo(candidateAcc);
+    if (!accountInfo.value) return;
+
+    const { lamports, owner, data } = accountInfo.value;
+
+    // Make sure this is parsed data, not raw bytes
+    if (typeof data === 'object' && 'parsed' in data) {
+      const parsedInfo = (data as any).parsed?.info;
+
+      // For SPL Token accounts, check token balance
+      const balance = parsedInfo?.tokenAmount?.uiAmount ?? 0;
+
+      if (owner.equals(expectedOwner) && balance === 0) {
+        const rent = lamports / 1e9;
+        console.log(
+          `[RECLAIMABLE] ${label}: ${candidateAcc.toBase58()} | Rent: ${rent.toFixed(6)} SOL`,
+        );
+        totalPotentialRecovery += rent;
+      }
+    } else {
+      // For raw system accounts, just check owner and lamports
+      if (owner.equals(expectedOwner) && lamports > 0) {
+        const rent = lamports / 1e9;
+        console.log(
+          `[RECLAIMABLE] ${label}: ${candidateAcc.toBase58()} | Rent: ${rent.toFixed(6)} SOL`,
+        );
+        totalPotentialRecovery += rent;
+      }
+    }
+  }
 }
 
 dryRunReclaim();

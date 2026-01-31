@@ -4,7 +4,9 @@
 
 It focuses specifically on rent paid during Associated Token Account (ATA) creation and other system-owned accounts created by a Kora paymaster.
 
-🎥 **Video Demo**: [https://www.youtube.com/watch?v=QgFevoeU-fA](https://www.youtube.com/watch?v=QgFevoeU-fA)
+🎥 **Video Demo**
+
+[![RentPurg3 Demo](https://img.youtube.com/vi/QgFevoeU-fA/0.jpg)](https://www.youtube.com/watch?v=QgFevoeU-fA)
 
 ---
 

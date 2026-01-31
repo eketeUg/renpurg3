@@ -196,7 +196,7 @@ export class BotService {
         );
       }
       if (command === '/balance') {
-        // await this.showBalance(msg.chat.id);
+        await this.showBalance(msg.chat.id);
       }
     } catch (error) {
       console.error(error);

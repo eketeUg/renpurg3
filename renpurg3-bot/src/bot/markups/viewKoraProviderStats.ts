@@ -46,12 +46,6 @@ export const showKoraNodeStatsMarkup = async (data: any[]) => {
     keyboard: [
       [
         {
-          text: 'View rentpurg3Bot',
-          url: `https://t.me/renpurg3Bot`,
-        },
-      ],
-      [
-        {
           text: 'Close ❌',
           callback_data: JSON.stringify({
             command: '/close',

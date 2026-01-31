@@ -14,15 +14,16 @@ import {
   PublicKey,
   Transaction,
   TransactionInstruction,
-  VersionedTransaction,
 } from '@solana/web3.js';
 
-// import * as dotenv from 'dotenv';
-// dotenv.config();
-
+/**
+ * Service for interacting with the Kora protocol.
+ * Handles gasless transaction creation and sponsorship via a Kora node.
+ */
 @Injectable()
 export class KoraClientService {
   private readonly logger = new Logger(KoraClientService.name);
+
   private CONFIG = {
     computeUnitLimit: 200_000,
     computeUnitPrice: 1_000_000n as MicroLamports,
@@ -30,12 +31,13 @@ export class KoraClientService {
     solanaWsUrl: process.env.SOLANA_WS_URL,
     koraRpcUrl: process.env.KORA_RPC_URL,
   };
+
   private koraClient: KoraClient;
   private rpc: Rpc<SolanaRpcApi>;
   private rpcSubscriptions: any;
   private confirmTransaction: any;
   private kora_signer: any;
-  private connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
+  private connection = new Connection(process.env.SOLANA_RPC_URL!, 'confirmed');
 
   constructor() {
     this.koraClient = new KoraClient({
@@ -54,99 +56,75 @@ export class KoraClientService {
     this.kora_signer = this.koraClient.getPayerSigner();
   }
 
+  /**
+   * Orchestrates a gasless token transfer.
+   * 1. Creates a transfer transaction via Kora client.
+   * 2. Retrieves a payment instruction for the sponsorship fee.
+   * 3. Combines instructions and signs with the user's key.
+   * 4. Relays the transaction back to Kora for execution.
+   */
   async sendToken(
-    sender: any,
-    receiverAddress: any,
+    sender: string,
+    receiverAddress: string,
     amount: number,
     signer: any,
   ): Promise<any> {
-    console.log(sender);
+    try {
+      // Create initial transfer transaction (without sponsorship)
+      const transfer = await this.koraClient.transferTransaction({
+        amount: amount * 1000000, // USDC (6 decimals)
+        token: process.env.USDC_MINT_ADDRESS!,
+        source: sender,
+        destination: receiverAddress,
+      });
 
-    const transfer = await this.koraClient.transferTransaction({
-      amount: amount * 1000000, // 1 USDC (6 decimals)
-      token: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
-      source: sender,
-      destination: receiverAddress,
-    });
+      // Get payment instruction to pay for the sponsorship in USDC
+      const paymentInstruction = await this.koraClient.getPaymentInstruction({
+        transaction: transfer.transaction,
+        fee_token: process.env.USDC_MINT_ADDRESS!,
+        source_wallet: sender,
+      });
 
-    console.log('Transfer Transaction:', transfer.instructions);
+      // Convert Kora instruction to web3.js format
+      const sponsorIx = this.toWeb3Instruction(
+        paymentInstruction.payment_instruction,
+      );
 
-    const paymentInstruction = await this.koraClient.getPaymentInstruction({
-      transaction: transfer.transaction,
-      fee_token: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', // USDC Mint Address
-      source_wallet: sender,
-    });
+      const txBuffer = Buffer.from(transfer.transaction, 'base64');
+      const transaction = Transaction.from(txBuffer);
 
-    console.log(paymentInstruction.payment_amount);
+      // Add sponsorship payment instruction to the transaction
+      transaction.add(sponsorIx);
 
-    const sponsorIx = this.toWeb3Instruction(
-      paymentInstruction.payment_instruction,
-    );
-    console.log('Converted Sponsor Instruction:', sponsorIx);
+      // Sign with the user's private key
+      transaction.sign(signer);
 
-    const txBuffer = Buffer.from(transfer.transaction, 'base64');
-    const transaction = Transaction.from(txBuffer);
-    console.log(
-      'Raw Transaction before adding Payment Instruction:',
-      transaction,
-    );
+      // Send the signed transaction back to Kora for sponsorship and execution
+      const result = await this.koraClient.signAndSendTransaction({
+        transaction: transaction
+          .serialize({ verifySignatures: false })
+          .toString('base64'),
+      });
 
-    transaction.add(sponsorIx);
-    transaction.sign(signer);
-
-    console.log(
-      'Raw Transaction with Payment Instruction:',
-      transaction.instructions,
-    );
-
-    const result = await this.koraClient.signAndSendTransaction({
-      transaction: transaction
-        .serialize({ verifySignatures: false })
-        .toString('base64'),
-    });
-
-    console.log('Transaction Result:', result);
-    return result;
+      return result;
+    } catch (error) {
+      this.logger.error('Error in gasless token transfer:', error.message);
+      return { signature: null, errorMessage: error.message };
+    }
   }
 
+  /**
+   * Utility to convert Kora-specific instruction format to standard web3.js TransactionInstruction.
+   */
   toWeb3Instruction(koraIx: any): TransactionInstruction {
     return new TransactionInstruction({
       programId: new PublicKey(koraIx.programAddress),
       keys: koraIx.accounts.map((acc: any) => ({
         pubkey: new PublicKey(acc.address),
-        isSigner: acc.role === 2, // role 2 usually means signer
-        isWritable: acc.role !== 0, // depends on Kora spec
+        isSigner: acc.role === 2, // role 2 corresponds to signer
+        isWritable: acc.role !== 0,
       })),
       data: Buffer.from(koraIx.data),
     });
-  }
-
-  deserializeTransaction(base64Tx: string): Transaction | VersionedTransaction {
-    if (!base64Tx || typeof base64Tx !== 'string') {
-      throw new Error('Invalid input: base64Tx must be a non-empty string');
-    }
-
-    let buffer: Buffer;
-    try {
-      buffer = Buffer.from(base64Tx, 'base64');
-    } catch (err) {
-      throw new Error(`Failed to decode base64: ${(err as Error).message}`);
-    }
-
-    // Try versioned transaction first (v0) — more modern & common with lookup tables
-    try {
-      return VersionedTransaction.deserialize(buffer);
-    } catch (e) {
-      // fallback to legacy
-      try {
-        return Transaction.from(buffer);
-      } catch (legacyErr) {
-        throw new Error(
-          `Deserialization failed for both VersionedTransaction and legacy Transaction.\n` +
-            `Versioned error: ${(e as Error).message}\n` +
-            `Legacy error:   ${(legacyErr as Error).message}`,
-        );
-      }
-    }
   }
 }

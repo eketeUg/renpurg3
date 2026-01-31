@@ -18,6 +18,10 @@ import { Keypair } from '@solana/web3.js';
 
 const token = process.env.TELEGRAM_TOKEN;
 
+/**
+ * Service responsible for managing the Gasless Transfer Telegram Bot.
+ * Handles user messages, button interactions, and orchestrates transaction execution via Kora.
+ */
 @Injectable()
 export class BotService {
   private readonly gaslessBot: TelegramBot;
@@ -33,20 +37,21 @@ export class BotService {
     this.gaslessBot.on('callback_query', this.handleButtonCommands);
   }
 
+  /**
+   * Primary handler for incoming text messages.
+   * Parses commands and executes corresponding logic for sending tokens or displaying menus.
+   */
   handleRecievedMessages = async (msg: any) => {
-    this.logger.debug(msg);
     try {
       await this.gaslessBot.sendChatAction(msg.chat.id, 'typing');
 
       const command = msg.text!;
 
+      // Regex to parse "send <amount> <address>" or simply "<amount> <address>"
       const sendRegex =
         /^\s*(?:send\s+)?(\d+(?:\.\d+)?)\s+(?:usdc\s+)?([1-9A-HJ-NP-Za-km-z]{32,44})\s*$/i;
 
       const matchSend = command?.trim().match(sendRegex);
-
-      console.log('matchSend :', matchSend);
-
       const user = await this.UserModel.findOne({ chatId: msg.chat.id });
 
       if (matchSend) {
@@ -57,10 +62,11 @@ export class BotService {
         if (!senderAddress) {
           return await this.gaslessBot.sendMessage(
             msg.chat.id,
-            `You don't have any wallet connected`,
+            `❌ You don't have a wallet connected. Use /start to create one.`,
           );
         }
 
+        // Check USDC balance before attempting gasless transfer
         const usdcBalance = await this.walletService.getUSDCBalance(
           senderAddress,
           process.env.SOLANA_RPC_URL!,
@@ -75,18 +81,19 @@ export class BotService {
           );
         }
 
+        // Decrypt wallet to get private key for signing
         const sendPrivateKey = await this.walletService.decryptSVMWallet(
           process.env.DEFAULT_WALLET_PIN!,
           user!.svmWalletDetails,
         );
-
-        console.log('rpc :', process.env.SOLANA_RPC_URL!);
 
         const signer = Keypair.fromSecretKey(
           bs58.decode(sendPrivateKey.privateKey),
         );
 
         const stopLoader = await this.sendStickerLoader(msg.chat.id);
+
+        // Execute gasless transfer via Kora Service
         const sendResult = await this.koraService.sendToken(
           user.svmWalletAddress,
           recipientAddress,
@@ -94,34 +101,35 @@ export class BotService {
           signer,
         );
 
+        await stopLoader();
+
         if (sendResult.signature) {
-          await stopLoader();
           return await this.gaslessBot.sendMessage(
             msg.chat.id,
             `✅ Successfully sent ${amount} USDC to <code>${recipientAddress}</code>\n\nTransaction Signature: <a href="${process.env.SOLANA_SCAN_URL}tx/${sendResult.signature}?cluster=devnet">${sendResult.signature}</a>`,
             { parse_mode: 'HTML' },
           );
         } else {
-          await stopLoader();
           return await this.gaslessBot.sendMessage(
             msg.chat.id,
-            `❌ Failed to send USDC: ${sendResult.errorMessage}`,
+            `❌ Failed to send USDC: ${sendResult.errorMessage || 'Unknown error'}`,
           );
         }
       }
 
+      // Handle /start command
       if (command === '/start') {
         let welcome;
-        console.log('User   ', user);
         const username = msg.from.username;
+
         if (!user) {
+          // Create new wallet for new user
           const newSVMWallet = await this.walletService.createSVMWallet();
-          const [encryptedSVMWalletDetails] = await Promise.all([
-            this.walletService.encryptSVMWallet(
+          const encryptedSVMWalletDetails =
+            await this.walletService.encryptSVMWallet(
               process.env.DEFAULT_WALLET_PIN!,
               newSVMWallet.privateKey,
-            ),
-          ]);
+            );
 
           await this.UserModel.create({
             chatId: msg.chat.id,
@@ -140,30 +148,33 @@ export class BotService {
               process.env.SOLANA_RPC_URL!,
             ),
           ]);
+
           welcome = await welcomeMessageMarkup(
             username,
             newSVMWallet.address,
             solBalance.balance.toFixed(2),
             usdcBalance.balance.toFixed(2),
           );
-        }
-        const [solBalance, usdcBalance] = await Promise.all([
-          this.walletService.getSolBalance(
-            user.svmWalletAddress,
-            process.env.SOLANA_RPC_URL!,
-          ),
-          this.walletService.getUSDCBalance(
-            user.svmWalletAddress,
-            process.env.SOLANA_RPC_URL!,
-          ),
-        ]);
+        } else {
+          const [solBalance, usdcBalance] = await Promise.all([
+            this.walletService.getSolBalance(
+              user.svmWalletAddress,
+              process.env.SOLANA_RPC_URL!,
+            ),
+            this.walletService.getUSDCBalance(
+              user.svmWalletAddress,
+              process.env.SOLANA_RPC_URL!,
+            ),
+          ]);
 
-        welcome = await welcomeMessageMarkup(
-          username,
-          user.svmWalletAddress,
-          solBalance.balance.toFixed(2),
-          usdcBalance.balance.toFixed(2),
-        );
+          welcome = await welcomeMessageMarkup(
+            username,
+            user.svmWalletAddress,
+            solBalance.balance.toFixed(2),
+            usdcBalance.balance.toFixed(2),
+          );
+        }
+
         if (welcome) {
           const replyMarkup = { inline_keyboard: welcome.keyboard };
           await this.gaslessBot.sendMessage(msg.chat.id, welcome.message, {
@@ -185,40 +196,42 @@ export class BotService {
           });
         }
       }
+
+      // Handle /cancel command
       if (command === '/cancel') {
         return await this.gaslessBot.sendMessage(
           msg.chat.id,
-          ' ✅All  active sessions closed successfully',
+          '✅ All active sessions closed successfully.',
         );
       }
+
+      // Handle /balance command
       if (command === '/balance') {
         await this.showBalance(msg.chat.id);
       }
     } catch (error) {
-      console.error(error);
+      this.logger.error('Error handling message:', error);
     }
   };
 
+  /**
+   * Logic for handling inline button clicks.
+   */
   handleButtonCommands = async (query: any) => {
-    this.logger.debug(query);
     let command: string;
 
-    function isJSON(str) {
+    const isJSON = (str: string) => {
       try {
         JSON.parse(str);
         return true;
-      } catch (e) {
-        console.log(e);
+      } catch {
         return false;
       }
-    }
+    };
 
     if (isJSON(query.data)) {
       const parsedData = JSON.parse(query.data);
-
-      if (parsedData.command) {
-        command = parsedData.command;
-      }
+      command = parsedData.command;
     } else {
       command = query.data;
     }
@@ -240,13 +253,10 @@ export class BotService {
 
         case '/fundWallet':
           if (user?.svmWalletAddress) {
-            let message = 'Wallet Address:\n';
-
-            if (user?.svmWalletAddress) {
-              message += `<b><code>${user.svmWalletAddress}</code></b>\n\n`;
-            }
-
-            message += 'Send USDC to your address above.';
+            let message = '<b>Deposit Address:</b>\n';
+            message += `<code>${user.svmWalletAddress}</code>\n\n`;
+            message +=
+              'Send USDC to your address above to start making gasless transfers.';
 
             return await this.gaslessBot.sendMessage(chatId, message, {
               parse_mode: 'HTML',
@@ -255,10 +265,7 @@ export class BotService {
                   [
                     {
                       text: 'Close ❌',
-                      callback_data: JSON.stringify({
-                        command: '/close',
-                        language: 'english',
-                      }),
+                      callback_data: JSON.stringify({ command: '/close' }),
                     },
                   ],
                   [
@@ -273,7 +280,7 @@ export class BotService {
           }
           return await this.gaslessBot.sendMessage(
             chatId,
-            'You dont have any wallet Address to fund',
+            '❌ No wallet found. Please use /start to create one.',
           );
 
         case '/checkBalance':
@@ -284,53 +291,49 @@ export class BotService {
 
         case '/sendUSDC':
           await this.gaslessBot.sendChatAction(chatId, 'typing');
-
           return await this.promptSendToken(chatId);
 
-        //   close opened markup and delete session
-        case '/closeDelete':
-          await this.gaslessBot.sendChatAction(query.message.chat.id, 'typing');
-          return await this.gaslessBot.deleteMessage(
-            query.message.chat.id,
-            query.message.message_id,
-          );
-
         case '/close':
-          await this.gaslessBot.sendChatAction(query.message.chat.id, 'typing');
+        case '/closeDelete':
+          await this.gaslessBot.sendChatAction(chatId, 'typing');
           return await this.gaslessBot.deleteMessage(
-            query.message.chat.id,
+            chatId,
             query.message.message_id,
           );
 
         default:
           return await this.gaslessBot.sendMessage(
-            query.message.chat.id,
-            `Processing command failed, please try again`,
+            chatId,
+            `⚠️ Unrecognized command. Please try using the menu.`,
           );
       }
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error handling button command:', error);
     }
   };
 
+  /**
+   * Sends the main features menu to the user.
+   */
   sendAllFeature = async (user: UserDocument) => {
     try {
       await this.gaslessBot.sendChatAction(user.chatId, 'typing');
       const allFeatures = await allFeaturesMarkup();
       if (allFeatures) {
-        const replyMarkup = {
-          inline_keyboard: allFeatures.keyboard,
-        };
+        const replyMarkup = { inline_keyboard: allFeatures.keyboard };
         await this.gaslessBot.sendMessage(user.chatId, allFeatures.message, {
           parse_mode: 'HTML',
           reply_markup: replyMarkup,
         });
       }
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error sending all features:', error);
     }
   };
 
+  /**
+   * Displays detailed wallet information including balances.
+   */
   sendAllWalletDetails = async (chatId: any, user: UserDocument) => {
     try {
       await this.gaslessBot.sendChatAction(chatId, 'typing');
@@ -345,34 +348,35 @@ export class BotService {
           process.env.SOLANA_RPC_URL!,
         ),
       ]);
+
       const allWalletFeatures = await walletDetailsMarkup(
         user.svmWalletAddress,
         solBalance.balance.toFixed(2),
         usdcBalance.balance.toFixed(2),
       );
+
       if (allWalletFeatures) {
-        const replyMarkup = {
-          inline_keyboard: allWalletFeatures.keyboard,
-        };
+        const replyMarkup = { inline_keyboard: allWalletFeatures.keyboard };
         await this.gaslessBot.sendMessage(chatId, allWalletFeatures.message, {
           parse_mode: 'HTML',
           reply_markup: replyMarkup,
         });
       }
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error sending wallet details:', error);
     }
   };
 
+  /**
+   * Shows stats related to the Kora node providing sponsorship.
+   */
   viewKoraNode = async (chatId: any) => {
     try {
       await this.gaslessBot.sendChatAction(chatId, 'typing');
-
       const kora_provider_details = await showKoraNodeStatsMarkup();
+
       if (kora_provider_details) {
-        const replyMarkup = {
-          inline_keyboard: kora_provider_details.keyboard,
-        };
+        const replyMarkup = { inline_keyboard: kora_provider_details.keyboard };
         await this.gaslessBot.sendMessage(
           chatId,
           kora_provider_details.message,
@@ -382,20 +386,23 @@ export class BotService {
           },
         );
       }
-      return;
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error viewing Kora stats:', error);
     }
   };
 
+  /**
+   * Displays the current SOL and USDC balance.
+   */
   showBalance = async (chatId: string, showMarkUp = true) => {
     try {
       await this.gaslessBot.sendChatAction(chatId, 'typing');
       const user = await this.UserModel.findOne({ chatId: chatId });
+
       if (!user?.svmWalletAddress) {
         return this.gaslessBot.sendMessage(
           chatId,
-          `You don't have any wallet connected`,
+          `❌ No wallet connected. Use /start to create one.`,
         );
       }
 
@@ -411,48 +418,51 @@ export class BotService {
       ]);
 
       if (showMarkUp) {
-        const showBalance = await showBalanceMarkup(
+        const balanceMarkup = await showBalanceMarkup(
           solBalance.balance.toFixed(2),
           usdcBalance.balance.toFixed(2),
         );
-        if (showBalance) {
-          const replyMarkup = { inline_keyboard: showBalance.keyboard };
 
+        if (balanceMarkup) {
+          const replyMarkup = { inline_keyboard: balanceMarkup.keyboard };
           return await this.gaslessBot.sendMessage(
             chatId,
-            showBalance.message,
+            balanceMarkup.message,
             {
-              parse_mode: 'HTML',
               reply_markup: replyMarkup,
+              parse_mode: 'HTML',
             },
           );
         }
-      } else {
-        return;
       }
     } catch (error) {
-      console.log('General error in showBalance:', error);
+      this.logger.error('Error showing balance:', error);
     }
   };
 
+  /**
+   * Prompts the user to provide details for a token transfer.
+   */
   promptSendToken = async (chatId: TelegramBot.ChatId) => {
     try {
       await this.gaslessBot.sendChatAction(chatId, 'typing');
       await this.gaslessBot.sendMessage(
         chatId,
-        `enter the amount of USDC you want to send and the recipient's wallet address in the format below:\n\n<code>amount recipient_wallet_address</code>\n\nFor example:\n<code>10 RecipientWalletAddressHere</code>`,
+        `⚠️ To send USDC, please reply to this message or type in the following format:\n\n<code>amount recipient_address</code>\n\n<b>Example:</b>\n<code>5 D6sFb1qwoLyZN2P2a4YVHTXBsQzc5miDkcqUCg6oeYeo</code>`,
         {
           parse_mode: 'HTML',
-          reply_markup: {
-            force_reply: true,
-          },
+          reply_markup: { force_reply: true },
         },
       );
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error prompting for token send:', error);
     }
   };
 
+  /**
+   * Sends a loading animation while a transaction is being processed.
+   * Returns a function to stop the animation and delete the message.
+   */
   sendStickerLoader = async (chatId: TelegramBot.ChatId) => {
     try {
       const animationMsg = await this.gaslessBot.sendAnimation(
@@ -462,23 +472,19 @@ export class BotService {
 
       const textMsg = await this.gaslessBot.sendMessage(
         chatId,
-        'Sending Token please wait ...',
+        '⏳ Processing gasless transaction, please wait...',
       );
 
-      // 👇 return cleanup function
       return async () => {
         try {
           await this.gaslessBot.deleteMessage(chatId, animationMsg.message_id);
-
           await this.gaslessBot.deleteMessage(chatId, textMsg.message_id);
-        } catch (err) {
-          console.log('Failed to cleanup loader:', err.message);
+        } catch {
+          // Ignore deletion errors (e.g. if message was already deleted)
         }
       };
     } catch (error) {
-      console.log(error);
-
-      // fallback empty cleanup
+      this.logger.error('Error sending sticker loader:', error);
       return async () => {};
     }
   };

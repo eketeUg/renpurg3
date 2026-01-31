@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   createCipheriv,
   createDecipheriv,
@@ -29,12 +29,24 @@ dotenv.config();
 const ALGORITHM = 'aes-256-cbc';
 const IV_LENGTH = 16;
 
+/**
+ * Service for managing Solana and SPL-token wallets.
+ * Handles wallet creation, encryption/decryption of private keys, and balance fetching.
+ */
 @Injectable()
 export class WalletService {
+  private readonly logger = new Logger(WalletService.name);
+
+  /**
+   * Generates a 256-bit hash of a password to be used as an encryption key.
+   */
   private generateKey(password: string): Buffer {
     return createHash('sha256').update(password).digest();
   }
 
+  /**
+   * Creates a new Solana wallet (Keypair) and returns its address and private key.
+   */
   createSVMWallet = (): Record<string, any> => {
     const keypair = Keypair.generate();
     const privateKey = keypair.secretKey;
@@ -46,17 +58,27 @@ export class WalletService {
     };
   };
 
+  /**
+   * Derives a Solana public address from a base58-encoded private key.
+   */
   getSVMAddressFromPrivateKey = (
     privateKey: string,
   ): Record<string, string> => {
-    const privateKeyBytes = bs58.decode(privateKey);
-    const wallet = Keypair.fromSecretKey(privateKeyBytes);
-    return {
-      address: wallet.publicKey.toBase58(),
-      privateKey: bs58.encode(wallet.secretKey),
-    };
+    try {
+      const privateKeyBytes = bs58.decode(privateKey);
+      const wallet = Keypair.fromSecretKey(privateKeyBytes);
+      return {
+        address: wallet.publicKey.toBase58(),
+        privateKey: bs58.encode(wallet.secretKey),
+      };
+    } catch (error) {
+      throw new Error(`Invalid private key format: ${error.message}`);
+    }
   };
 
+  /**
+   * Encrypts a private key using AES-256-CBC with a user-provided PIN.
+   */
   encryptSVMWallet = async (
     password: string,
     privateKey: string,
@@ -72,24 +94,34 @@ export class WalletService {
     return { json: encryptedWallet };
   };
 
+  /**
+   * Decrypts an encrypted wallet string using the provided PIN.
+   */
   decryptSVMWallet = async (
     password: string,
     encryptedWallet: string,
   ): Promise<Record<string, any>> => {
-    const key = this.generateKey(password);
-    const [ivHex, encrypted] = encryptedWallet.split(':');
-    const iv = Buffer.from(ivHex, 'hex');
+    try {
+      const key = this.generateKey(password);
+      const [ivHex, encrypted] = encryptedWallet.split(':');
+      const iv = Buffer.from(ivHex, 'hex');
 
-    const decipher = createDecipheriv(ALGORITHM, key, iv);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
+      const decipher = createDecipheriv(ALGORITHM, key, iv);
+      let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+      decrypted += decipher.final('utf8');
 
-    return {
-      privateKey: decrypted,
-      address: this.getSVMAddressFromPrivateKey(decrypted).address,
-    };
+      return {
+        privateKey: decrypted,
+        address: this.getSVMAddressFromPrivateKey(decrypted).address,
+      };
+    } catch (error) {
+      throw new Error(`Failed to decrypt wallet: ${error.message}`);
+    }
   };
 
+  /**
+   * Fetches the SOL balance for a given address.
+   */
   getSolBalance = async (
     address: string,
     rpcURL: string,
@@ -98,14 +130,19 @@ export class WalletService {
       const connection = new Connection(rpcURL, 'confirmed');
       const publicKey = new PublicKey(address);
       const balance = await connection.getBalance(publicKey);
-      return {
-        balance: balance / LAMPORTS_PER_SOL, // Convert lamports to SOL
-      };
+      return { balance: balance / LAMPORTS_PER_SOL };
     } catch (error) {
-      throw new Error(`Failed to get SOL balance: ${error.message}`);
+      this.logger.error(
+        `Failed to get SOL balance for ${address}:`,
+        error.message,
+      );
+      return { balance: 0 };
     }
   };
 
+  /**
+   * Fetches the balance of an SPL token for a given address.
+   */
   getSPLTokenBalance = async (
     address: string,
     tokenAddress: string,
@@ -116,182 +153,71 @@ export class WalletService {
       const connection = new Connection(rpcURL, 'confirmed');
       const publicKey = new PublicKey(address);
       const tokenMint = new PublicKey(tokenAddress);
-      // console.log(tokenMint);
+
       const associatedTokenAddress = await getAssociatedTokenAddress(
         tokenMint,
         publicKey,
         true,
       );
-      console.log(
-        'Associated Token Address (ATA):',
-        associatedTokenAddress.toBase58(),
-      );
-      // Check if the associated token account exists
+
       const accountInfo = await connection.getAccountInfo(
         associatedTokenAddress,
       );
-      // console.log(accountInfo);
-      if (!accountInfo) {
-        return {
-          balance: 0, // Return 0 if the account does not exist
-        };
-      }
+      if (!accountInfo) return { balance: 0 };
 
       const tokenAccount = await getAccount(connection, associatedTokenAddress);
-      return {
-        balance: Number(tokenAccount.amount) / 10 ** decimal,
-      };
+      return { balance: Number(tokenAccount.amount) / 10 ** decimal };
     } catch (error) {
-      console.log('ERROR', error);
-      throw new Error(`Failed to get SPL token balance: ${error.message}`);
+      this.logger.error(`Error fetching SPL token balance:`, error.message);
+      return { balance: 0 };
     }
   };
 
-  // getUSDCBalance = async (
-  //   address: string,
-  //   rpcURL: string,
-  // ): Promise<Record<string, number>> => {
-  //   try {
-  //     const connection = new Connection(rpcURL, 'confirmed');
-  //     const publicKey = new PublicKey(address);
-  //     const tokenMint = new PublicKey(process.env.USDC_MINT_ADDRESS || '');
-  //     // console.log(tokenMint);
-  //     const associatedTokenAddress = await getAssociatedTokenAddress(
-  //       tokenMint,
-  //       publicKey,
-  //       true,
-  //     );
-  //     console.log(
-  //       'Associated Token Address (ATA):',
-  //       associatedTokenAddress.toBase58(),
-  //     );
-  //     // Check if the associated token account exists
-  //     const accountInfo = await connection.getAccountInfo(
-  //       associatedTokenAddress,
-  //     );
-  //     // console.log(accountInfo);
-  //     if (!accountInfo) {
-  //       return {
-  //         balance: 0, // Return 0 if the account does not exist
-  //       };
-  //     }
-
-  //     const tokenAccount = await getAccount(connection, associatedTokenAddress);
-  //     return {
-  //       balance: Number(tokenAccount.amount) / 10 ** 6,
-  //     };
-  //   } catch (error) {
-  //     console.log('ERROR', error);
-  //     throw new Error(`Failed to get SPL token balance: ${error.message}`);
-  //   }
-  // };
-
+  /**
+   * Fetches the USDC balance specifically (uses 6 decimals).
+   */
   getUSDCBalance = async (
     address: string,
     rpcURL: string,
   ): Promise<Record<string, number>> => {
     try {
       if (!process.env.USDC_MINT_ADDRESS) {
-        throw new Error('USDC_MINT_ADDRESS is not set in env variables');
+        throw new Error(
+          'USDC_MINT_ADDRESS is not set in environment variables',
+        );
       }
 
       const connection = new Connection(rpcURL, 'confirmed');
       const publicKey = new PublicKey(address);
       const tokenMint = new PublicKey(process.env.USDC_MINT_ADDRESS);
 
-      // Get the associated token account (ATA)
       const associatedTokenAddress = await getAssociatedTokenAddress(
         tokenMint,
         publicKey,
-        true, // allowOwnerOffCurve
+        true,
       );
 
-      console.log(
-        'Associated Token Address (ATA):',
-        associatedTokenAddress.toBase58(),
-      );
-
-      // Fetch account info to check if it exists
       const accountInfo = await connection.getAccountInfo(
         associatedTokenAddress,
       );
+      if (!accountInfo) return { balance: 0 };
 
-      if (!accountInfo) {
-        return { balance: 0 }; // No account exists, balance is 0
-      }
-
-      // Fetch token account data
       const tokenAccount = await getAccount(connection, associatedTokenAddress);
-
-      // USDC has 6 decimals
       const balance = Number(tokenAccount.amount) / 10 ** 6;
 
       return { balance };
     } catch (error: any) {
-      console.error('ERROR fetching USDC balance:', error);
-      throw new Error(`Failed to get SPL token balance: ${error.message}`);
-    }
-  };
-
-  getToken2022Balance = async (
-    walletAddress: string,
-    tokenMintAddress: string,
-    rpcUrl: string,
-    decimals: number,
-    programId: string,
-  ): Promise<Record<string, number>> => {
-    // Validate inputs
-    if (!walletAddress || !tokenMintAddress || !rpcUrl || decimals < 0) {
-      throw new Error('Invalid input parameters');
-    }
-
-    // Initialize connection
-    const connection = new Connection(rpcUrl, 'confirmed');
-
-    // Convert to PublicKey objects
-    let walletPubkey: PublicKey;
-    let tokenMintPubkey: PublicKey;
-    try {
-      walletPubkey = new PublicKey(walletAddress);
-      tokenMintPubkey = new PublicKey(tokenMintAddress);
-    } catch (error) {
-      console.log(error);
-      throw new Error('Invalid wallet or token mint address format');
-    }
-
-    // Get the associated token account (ATA) for Token-2022
-    const associatedTokenAddress = await getAssociatedTokenAddress(
-      tokenMintPubkey,
-      walletPubkey,
-      true, // Allow owner off-curve
-      new PublicKey(programId), // Use Token-2022 program ID
-    );
-
-    // Fetch token account balance
-    try {
-      const tokenAccount = await getAccount(
-        connection,
-        associatedTokenAddress,
-        'confirmed',
-        new PublicKey(programId), // Specify Token-2022 program
+      this.logger.error(
+        `ERROR fetching USDC balance for ${address}:`,
+        error.message,
       );
-
-      const balance = Number(tokenAccount.amount) / 10 ** decimals;
-
-      return {
-        balance,
-      };
-    } catch (error) {
-      if (error.name === 'TokenAccountNotFoundError') {
-        // Return 0 balance if the ATA doesn't exist
-        return {
-          balance: 0,
-        };
-      }
-      throw new Error(`Failed to fetch Token-2022 balance: ${error.message}`);
+      return { balance: 0 };
     }
   };
 
+  /**
+   * Transfers SOL from core wallet to recipient.
+   */
   transferSOL = async (
     privateKey: string,
     recipientAddress: string,
@@ -318,15 +244,15 @@ export class WalletService {
         [senderKeypair],
       );
 
-      return {
-        signature,
-        description,
-      };
+      return { signature, description };
     } catch (error) {
       throw new Error(`Failed to transfer SOL: ${error.message}`);
     }
   };
 
+  /**
+   * Directly transfers SPL tokens (not gasless).
+   */
   transferSPLToken = async (
     privateKey: string,
     recipientAddress: string,
@@ -337,12 +263,6 @@ export class WalletService {
     description?: string,
   ): Promise<Record<any, unknown>> => {
     try {
-      console.log('RPC URL:', rpcURL);
-      console.log('privateKey:', privateKey);
-      console.log('recipientAddress:', recipientAddress);
-      console.log('amount:', amount);
-      console.log('tokenAddress:', tokenAddress);
-      console.log('decimal:', decimal);
       const connection = new Connection(rpcURL, 'confirmed');
       const senderKeypair = Keypair.fromSecretKey(bs58.decode(privateKey));
       const recipientPubkey = new PublicKey(recipientAddress);
@@ -352,9 +272,10 @@ export class WalletService {
         tokenMint,
         senderKeypair.publicKey,
       );
+
       const recipientATA = await getOrCreateAssociatedTokenAccount(
         connection,
-        senderKeypair, // payer
+        senderKeypair,
         tokenMint,
         recipientPubkey,
       );
@@ -376,15 +297,16 @@ export class WalletService {
         [senderKeypair],
       );
 
-      return {
-        signature,
-        description,
-      };
+      return { signature, description };
     } catch (error) {
       throw new Error(`Failed to transfer SPL token: ${error.message}`);
     }
   };
 
+  /**
+   * Builds a token transfer transaction without sending it.
+   * Useful for external fee paying or manual signing.
+   */
   builtTokenTranferTx = async (
     privateKey: string,
     recipientAddress: string,
@@ -392,14 +314,8 @@ export class WalletService {
     tokenAddress: string,
     rpcURL: string,
     decimal: number,
-  ): Promise<any> => {
+  ): Promise<Transaction> => {
     try {
-      console.log('RPC URL:', rpcURL);
-      console.log('privateKey:', privateKey);
-      console.log('recipientAddress:', recipientAddress);
-      console.log('amount:', amount);
-      console.log('tokenAddress:', tokenAddress);
-      console.log('decimal:', decimal);
       const connection = new Connection(rpcURL, 'confirmed');
       const senderKeypair = Keypair.fromSecretKey(bs58.decode(privateKey));
       const recipientPubkey = new PublicKey(recipientAddress);
@@ -409,9 +325,10 @@ export class WalletService {
         tokenMint,
         senderKeypair.publicKey,
       );
+
       const recipientATA = await getOrCreateAssociatedTokenAccount(
         connection,
-        senderKeypair, // payer
+        senderKeypair,
         tokenMint,
         recipientPubkey,
       );
@@ -428,13 +345,12 @@ export class WalletService {
       );
 
       const { blockhash } = await connection.getLatestBlockhash();
-
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = senderKeypair.publicKey;
 
       return transaction;
     } catch (error) {
-      throw new Error(`Failed to transfer SPL token: ${error.message}`);
+      throw new Error(`Failed to build transfer transaction: ${error.message}`);
     }
   };
 }

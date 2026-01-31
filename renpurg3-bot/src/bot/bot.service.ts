@@ -14,6 +14,10 @@ import { ReclaimService } from 'src/reclaim/reclaim.service';
 
 const token = process.env.TELEGRAM_TOKEN;
 
+/**
+ * Service for managing the RentPurg3 Bot.
+ * Provides the interface for node operators to scan for and reclaim rent-locked SOL.
+ */
 @Injectable()
 export class BotService {
   private readonly renPurge3Bot: TelegramBot;
@@ -29,41 +33,38 @@ export class BotService {
     this.renPurge3Bot.on('callback_query', this.handleButtonCommands);
   }
 
+  /**
+   * Main handler for incoming messages from operators.
+   * Supports scanning by wallet address or command.
+   */
   handleRecievedMessages = async (msg: any) => {
-    this.logger.debug(msg);
     try {
       await this.renPurge3Bot.sendChatAction(msg.chat.id, 'typing');
 
       const walletRegex = /^\s*([1-9A-HJ-NP-Za-km-z]{32,44})\s*$/;
-
       const match = msg.text?.trim().match(walletRegex);
 
       const user = await this.UserModel.findOne({ chatId: msg.chat.id });
 
+      // If operator sends a wallet address, trigger a scan for that address
       if (match) {
         const walletAddress = match[1];
-        console.log('Wallet:', walletAddress);
-
         await this.scanProvider(msg.chat.id, walletAddress);
       }
 
       const command = msg.text!;
-      console.log('Command :', command);
 
       if (command === '/start') {
-        let welcome;
-        console.log('User   ', user);
         const username = msg.from.username;
+
         if (!user) {
           await this.UserModel.create({
             chatId: msg.chat.id,
             userName: username,
           });
-
-          welcome = await welcomeMessageMarkup(username);
         }
 
-        welcome = await welcomeMessageMarkup(username);
+        const welcome = await welcomeMessageMarkup(username);
         if (welcome) {
           const replyMarkup = { inline_keyboard: welcome.keyboard };
           await this.renPurge3Bot.sendMessage(msg.chat.id, welcome.message, {
@@ -89,37 +90,37 @@ export class BotService {
           );
         }
       }
+
+      // Handle /cancel command
       if (command === '/cancel') {
         return await this.renPurge3Bot.sendMessage(
           msg.chat.id,
-          ' ✅All  active sessions closed successfully',
+          '✅ All active scanning sessions closed.',
         );
       }
     } catch (error) {
-      console.error(error);
+      this.logger.error('Error handling message:', error);
     }
   };
 
+  /**
+   * Logic for handling operator interactions with inline buttons.
+   */
   handleButtonCommands = async (query: any) => {
-    this.logger.debug(query);
     let command: string;
 
-    function isJSON(str) {
+    const isJSON = (str: string) => {
       try {
         JSON.parse(str);
         return true;
-      } catch (e) {
-        console.log(e);
+      } catch {
         return false;
       }
-    }
+    };
 
     if (isJSON(query.data)) {
       const parsedData = JSON.parse(query.data);
-
-      if (parsedData.command) {
-        command = parsedData.command;
-      }
+      command = parsedData.command;
     } else {
       command = query.data;
     }
@@ -142,74 +143,66 @@ export class BotService {
         case '/scanImported':
           return this.promptWalletInput(chatId);
 
-        //   close opened markup and delete session
-        case '/closeDelete':
-          await this.renPurge3Bot.sendChatAction(
-            query.message.chat.id,
-            'typing',
-          );
-          return await this.renPurge3Bot.deleteMessage(
-            query.message.chat.id,
-            query.message.message_id,
-          );
-
         case '/close':
-          await this.renPurge3Bot.sendChatAction(
-            query.message.chat.id,
-            'typing',
-          );
+        case '/closeDelete':
+          await this.renPurge3Bot.sendChatAction(chatId, 'typing');
           return await this.renPurge3Bot.deleteMessage(
-            query.message.chat.id,
+            chatId,
             query.message.message_id,
           );
 
         default:
           return await this.renPurge3Bot.sendMessage(
-            query.message.chat.id,
-            `Processing command failed, please try again`,
+            chatId,
+            `⚠️ Failed to process command. Please try again.`,
           );
       }
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error handling button command:', error);
     }
   };
 
+  /**
+   * Displays the operator menu.
+   */
   sendAllFeature = async (user: UserDocument) => {
     try {
       await this.renPurge3Bot.sendChatAction(user.chatId, 'typing');
       const allFeatures = await allFeaturesMarkup();
       if (allFeatures) {
-        const replyMarkup = {
-          inline_keyboard: allFeatures.keyboard,
-        };
+        const replyMarkup = { inline_keyboard: allFeatures.keyboard };
         await this.renPurge3Bot.sendMessage(user.chatId, allFeatures.message, {
           parse_mode: 'HTML',
           reply_markup: replyMarkup,
         });
       }
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error sending all features:', error);
     }
   };
 
+  /**
+   * Prompts the operator to paste a provider address to scan.
+   */
   promptWalletInput = async (chatId: TelegramBot.ChatId) => {
     try {
       await this.renPurge3Bot.sendChatAction(chatId, 'typing');
       await this.renPurge3Bot.sendMessage(
         chatId,
-        `enter the provider wallet you want to scan`,
+        `🔗 Please paste the <b>Kora Provider Wallet</b> address you wish to scan for reclaimable rent:`,
         {
           parse_mode: 'HTML',
-          reply_markup: {
-            force_reply: true,
-          },
+          reply_markup: { force_reply: true },
         },
       );
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error prompting for wallet input:', error);
     }
   };
 
+  /**
+   * Initiates a scan of the Solana ledger to find accounts sponsored by a specific provider.
+   */
   scanProvider = async (
     chatId: TelegramBot.ChatId,
     providerWallet?: string,
@@ -217,40 +210,37 @@ export class BotService {
     try {
       await this.renPurge3Bot.sendChatAction(chatId, 'typing');
       const stopLoader = await this.sendStickerLoader(chatId);
+
       const result = await this.reclaimService.scanProviderWallet(
         providerWallet ? providerWallet : process.env.KORA_PROVIDER_PUBKEY,
       );
 
+      await stopLoader();
+
       if (result.length > 0) {
         const markup = await showKoraNodeStatsMarkup(result);
         if (markup) {
-          await stopLoader();
-          const replyMarkup = {
-            inline_keyboard: markup.keyboard,
-          };
+          const replyMarkup = { inline_keyboard: markup.keyboard };
           await this.renPurge3Bot.sendMessage(chatId, markup.message, {
             parse_mode: 'HTML',
             reply_markup: replyMarkup,
           });
         }
-
-        return;
       } else {
-        await stopLoader();
         await this.renPurge3Bot.sendMessage(
           chatId,
-          `No reclaimable ATAs found for the provided wallet.`,
-          {
-            parse_mode: 'HTML',
-          },
+          `✅ No reclaimable ATAs found for the provided wallet. All accounts are either active or purged.`,
+          { parse_mode: 'HTML' },
         );
       }
-      return;
     } catch (error) {
-      console.log(error);
+      this.logger.error('Error scanning provider:', error);
     }
   };
 
+  /**
+   * Displays a loading animation during the scanning process.
+   */
   sendStickerLoader = async (chatId: TelegramBot.ChatId) => {
     try {
       const animationMsg = await this.renPurge3Bot.sendAnimation(
@@ -260,26 +250,22 @@ export class BotService {
 
       const textMsg = await this.renPurge3Bot.sendMessage(
         chatId,
-        '🔍 Scanning in progress, please wait...',
+        '🔍 Scanning Solana ledger for sponsored accounts...',
       );
 
-      // 👇 return cleanup function
       return async () => {
         try {
           await this.renPurge3Bot.deleteMessage(
             chatId,
             animationMsg.message_id,
           );
-
           await this.renPurge3Bot.deleteMessage(chatId, textMsg.message_id);
-        } catch (err) {
-          console.log('Failed to cleanup loader:', err.message);
+        } catch {
+          // Ignore deletion errors
         }
       };
     } catch (error) {
-      console.log(error);
-
-      // fallback empty cleanup
+      this.logger.error('Error sending sticker loader:', error);
       return async () => {};
     }
   };
